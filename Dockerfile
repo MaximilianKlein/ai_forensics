@@ -4,10 +4,11 @@
 FROM node:20-slim AS frontend-builder
 WORKDIR /app/frontend
 
-RUN corepack enable && corepack prepare pnpm@latest --activate
+# Install pnpm v9 matching lockfileVersion 9.0 (avoids corepack version mismatch)
+RUN npm install -g pnpm@9.15.4
 
-COPY frontend/package.json frontend/pnpm-lock.yaml* ./
-RUN pnpm install --frozen-lockfile || pnpm install
+COPY frontend/package.json frontend/pnpm-lock.yaml ./
+RUN pnpm install --frozen-lockfile
 
 COPY frontend/ ./
 RUN pnpm build
