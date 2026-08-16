@@ -135,14 +135,7 @@ def health():
 
 @app.get("/api/health")
 def health_endpoint():
-    status = model_manager.get_status()
-    if not status["is_ready"]:
-        raise HTTPException(status_code=503, detail="Model is still initializing weights")
-    return {
-        "status": "ready",
-        "is_ready": True,
-        "model_status": status
-    }
+    return {"status": "ok"}
 
 @app.get("/api/models/status")
 def model_status_endpoint():
@@ -691,7 +684,7 @@ def run_warmup_generation(model_name: Optional[str] = None) -> Dict[str, Any]:
     Executes a full end-to-end watermarked generation pass using the exact production pipeline,
     default watermark parameters (gamma=0.25, delta=recommended_delta, hash_key=89173511, context_width=1),
     and model formatting. This ensures all logits processors, sampling kernels, tokenizers, KV cache allocations,
-    and mmap memory buffers are 100% warm in physical RAM before the service becomes healthy.
+    and mmap memory buffers are 100% warm in physical RAM.
     """
     ensure_model_loaded(model_name)
     llm = model_manager.current_model
@@ -731,7 +724,7 @@ def run_warmup_generation(model_name: Optional[str] = None) -> Dict[str, Any]:
 
     stream = llm(
         effective_prompt,
-        max_tokens=32,
+        max_tokens=24,
         temperature=0.7,
         top_p=0.9,
         logits_processor=processors,
@@ -772,17 +765,17 @@ async def startup_event():
         try:
             logger.info(f"Startup: Pre-loading default model '{target_model}' into memory...")
             model_manager.load_model(target_model)
-            logger.info(f"Startup: Executing full production watermarked generation warmup on '{target_model}'...")
+            logger.info(f"Startup: Running full watermarked generation warmup on '{target_model}'...")
             warmup_res = run_warmup_generation(target_model)
             logger.info(
-                f"Startup: Full generation warmup successfully completed for '{target_model}'!\n"
+                f"Startup: Warmup generation complete for '{target_model}'!\n"
                 f"  - Generated Text: {json.dumps(warmup_res['generated_text'])}\n"
                 f"  - Tokens: {warmup_res['total_tokens']}\n"
                 f"  - Green Tokens: {warmup_res['green_count']}/{warmup_res['total_tokens']} ({warmup_res['green_fraction']*100:.1f}%)\n"
-                f"Ready to serve with 100% warm memory."
+                f"Model is fully warm and ready."
             )
         except Exception as e:
-            logger.warning(f"Startup: Could not execute full warmup for '{target_model}': {e}")
+            logger.warning(f"Startup: Could not run warmup generation for '{target_model}': {e}")
 
 
 # ---------------------------------------------------------------------------

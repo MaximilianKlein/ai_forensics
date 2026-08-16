@@ -245,15 +245,6 @@ class ModelManager:
                 )
                 self.current_model_path = target_path
                 self.current_model_name = model_name_or_path
-
-                # Execute a lightweight warmup forward pass to fault memory pages and compile inference graph
-                try:
-                    logger.info(f"Executing warmup inference pass for '{model_name_or_path}'...")
-                    _ = self.current_model("Hello", max_tokens=2, temperature=0.0, echo=False)
-                    logger.info(f"Warmup forward pass complete for '{model_name_or_path}'.")
-                except Exception as we:
-                    logger.warning(f"Non-fatal warmup generation warning for '{model_name_or_path}': {we}")
-
                 self.is_loading = False
                 self.loading_model_name = None
                 return self.current_model
