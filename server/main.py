@@ -697,10 +697,11 @@ async def startup_event():
             logger.info(f"Startup: Pre-loading default model '{target_model}' into memory before going live...")
             llm = model_manager.load_model(target_model)
             try:
-                _ = llm.tokenize(b"Warmup")
-            except Exception:
-                pass
-            logger.info(f"Startup: Successfully initialized and warmed up '{target_model}'. Ready to serve.")
+                warmup_out = llm("System test prompt.", max_tokens=3, temperature=0.1, echo=False)
+                gen_text = warmup_out.get("choices", [{}])[0].get("text", "").strip()
+                logger.info(f"Startup: Successfully initialized model '{target_model}'. Test generation output: {json.dumps(gen_text)}. Ready to serve.")
+            except Exception as ge:
+                logger.warning(f"Startup: Warmup mini text generation pass note: {ge}")
         except Exception as e:
             logger.warning(f"Startup: Could not auto-load '{target_model}': {e}")
 
