@@ -42,13 +42,14 @@ WORKDIR /app
 
 # Install Python dependencies using pre-compiled wheels (avoids high-RAM source compilation)
 COPY requirements.txt .
-RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir --prefer-binary --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu -r requirements.txt
+RUN pip install --no-cache-dir --default-timeout=100 --retries 5 --prefer-binary \
+    --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu \
+    -r requirements.txt
 
 # Download ultra-compact Qwen2.5-0.5B-Instruct in Q4_K_M GGUF format (~398 MB)
 # Ideal memory footprint for Render free & starter tier allocations
 RUN mkdir -p /models && \
-    curl -L -o /models/qwen2.5-0.5b-instruct-q4_k_m.gguf \
+    curl -L --retry 5 --retry-delay 2 -o /models/qwen2.5-0.5b-instruct-q4_k_m.gguf \
     "https://huggingface.co/Qwen/Qwen2.5-0.5B-Instruct-GGUF/resolve/main/qwen2.5-0.5b-instruct-q4_k_m.gguf"
 
 # Copy application backend source code
