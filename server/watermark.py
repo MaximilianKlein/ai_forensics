@@ -44,20 +44,36 @@ def compute_hash_seed(context_tokens: List[int], hash_key: int) -> int:
         val = (val * 31337 + tok) % (2**32 - 1)
     return int(val)
 
-def get_green_list(vocab_size: int, context_tokens: List[int], gamma: float, hash_key: int) -> set:
-    """
-    Deterministically partitions the vocabulary into a green list.
-    """
-    seed = compute_hash_seed(context_tokens, hash_key)
+from functools import lru_cache
+
+@lru_cache(maxsize=8192)
+def _compute_green_array_cached(seed: int, vocab_size: int, green_size: int) -> np.ndarray:
     rng = np.random.RandomState(seed)
     permutation = rng.permutation(vocab_size)
+    return permutation[:green_size]
+
+def get_green_list(vocab_size: int, context_tokens: Any, gamma: float, hash_key: int) -> set:
+    """
+    Deterministically partitions the vocabulary into a green list.
+    Uses LRU-cached permutation for high performance.
+    """
+    if isinstance(context_tokens, np.ndarray):
+        ctx_tuple = tuple(context_tokens.tolist())
+    elif isinstance(context_tokens, list):
+        ctx_tuple = tuple(context_tokens)
+    else:
+        ctx_tuple = tuple(context_tokens)
+
+    seed = compute_hash_seed(list(ctx_tuple), hash_key)
     green_size = int(vocab_size * gamma)
-    return set(permutation[:green_size].tolist())
+    green_arr = _compute_green_array_cached(seed, vocab_size, green_size)
+    return set(green_arr.tolist())
 
 class WatermarkLogitsProcessor:
     """
     Kirchenbauer et al. Watermark Logits Processor for llama-cpp-python.
     Intercepts logits before sampling and boosts green-list tokens by delta.
+    Supports both 1D and 2D logits tensors.
     """
     def __init__(self, vocab_size: int, config: WatermarkConfig):
         self.vocab_size = vocab_size
@@ -71,20 +87,27 @@ class WatermarkLogitsProcessor:
         # Extract context tokens
         h = max(1, self.config.context_width)
         if isinstance(input_ids, np.ndarray):
-            ctx = input_ids[-h:].tolist()
+            ctx_list = input_ids[-h:].tolist()
         else:
-            ctx = list(input_ids[-h:])
+            ctx_list = list(input_ids[-h:])
 
-        # Generate green list
-        seed = compute_hash_seed(ctx, self.config.hash_key)
-        rng = np.random.RandomState(seed)
-        vocab_permutation = rng.permutation(self.vocab_size)
-        green_list_size = int(self.vocab_size * self.config.gamma)
-        green_list = vocab_permutation[:green_list_size]
-        self.last_green_list = set(green_list.tolist())
+        # Determine effective vocabulary dimension
+        effective_vocab = logits.shape[-1] if hasattr(logits, 'shape') and len(logits.shape) > 0 else self.vocab_size
+        green_size = int(effective_vocab * self.config.gamma)
 
-        # Apply logit boost
-        logits[green_list] += self.config.delta
+        # Generate green list with cached permutation
+        seed = compute_hash_seed(ctx_list, self.config.hash_key)
+        green_arr = _compute_green_array_cached(seed, effective_vocab, green_size)
+        self.last_green_list = set(green_arr.tolist())
+
+        # Apply logit boost across last dimension (supports 1D shape (vocab,) or 2D shape (1, vocab))
+        if logits.ndim == 1:
+            logits[green_arr] += self.config.delta
+        elif logits.ndim == 2:
+            logits[:, green_arr] += self.config.delta
+        else:
+            logits[..., green_arr] += self.config.delta
+
         return logits
 
 

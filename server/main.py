@@ -237,11 +237,26 @@ async def generate_stream(req: GenerateRequest):
     def run_inference_worker():
         with model_manager.inference_lock:
             try:
+                loop.call_soon_threadsafe(
+                    queue.put_nowait,
+                    {"type": "status", "stage": "tokenizing", "message": f"Tokenizing prompt with {target_model_name}..."}
+                )
                 prompt_tokens = llm.tokenize(effective_prompt.encode('utf-8'))
                 all_tokens = list(prompt_tokens)
                 generated_tokens = []
                 green_count = 0
                 h = max(1, req.context_width)
+
+                loop.call_soon_threadsafe(
+                    queue.put_nowait,
+                    {
+                        "type": "status",
+                        "stage": "evaluating_prompt",
+                        "message": f"Evaluating prompt ({len(prompt_tokens)} tokens) into KV cache...",
+                        "prompt_tokens_count": len(prompt_tokens)
+                    }
+                )
+                logger.info(f"InferenceWorker: Starting stream for '{target_model_name}' ({len(prompt_tokens)} prompt tokens, max={req.max_tokens})...")
 
                 stream = llm(
                     effective_prompt,
@@ -287,6 +302,8 @@ async def generate_stream(req: GenerateRequest):
                             }
                             loop.call_soon_threadsafe(queue.put_nowait, token_payload)
 
+                logger.info(f"InferenceWorker: Finished generating {len(generated_tokens)} tokens.")
+
                 # Final stats
                 full_text = model_manager.decode_tokens(generated_tokens)
                 detection = detect_watermark(
@@ -303,8 +320,13 @@ async def generate_stream(req: GenerateRequest):
                 loop.call_soon_threadsafe(queue.put_nowait, done_payload)
 
             except Exception as e:
-                logger.error(f"Inference error: {e}", exc_info=True)
-                loop.call_soon_threadsafe(queue.put_nowait, {"type": "error", "message": str(e)})
+                import traceback
+                tb = traceback.format_exc()
+                logger.error(f"InferenceWorker error: {e}\n{tb}", exc_info=True)
+                loop.call_soon_threadsafe(
+                    queue.put_nowait,
+                    {"type": "error", "message": f"Inference Error: {str(e)}", "details": tb}
+                )
             finally:
                 loop.call_soon_threadsafe(queue.put_nowait, None)
 
@@ -312,7 +334,16 @@ async def generate_stream(req: GenerateRequest):
     threading.Thread(target=run_inference_worker, daemon=True, name="InferenceWorker").start()
 
     async def event_generator():
-        yield f"data: {json.dumps({'type': 'start', 'config': wm_config.dict(), 'vocab_size': vocab_size, 'effective_prompt': effective_prompt})}\n\n"
+        start_payload = {
+            "type": "start",
+            "config": wm_config.dict(),
+            "vocab_size": vocab_size,
+            "effective_prompt": effective_prompt,
+            "model_name": target_model_name,
+            "max_tokens": req.max_tokens,
+            "temperature": req.temperature
+        }
+        yield f"data: {json.dumps(start_payload)}\n\n"
         while True:
             item = await queue.get()
             if item is None:
@@ -688,7 +719,7 @@ def get_model_config_endpoint(model_name: str):
 
 
 # ---------------------------------------------------------------------------
-# Startup Model Auto-Loading
+# Startup Model Auto-Loading & Warmup
 # ---------------------------------------------------------------------------
 @app.on_event("startup")
 def startup_event():
@@ -698,11 +729,17 @@ def startup_event():
 
     if target_model:
         try:
-            logger.info(f"Startup: Auto-loading default model '{target_model}'...")
-            model_manager.load_model(target_model)
-            logger.info(f"Startup: Successfully loaded model '{target_model}'.")
+            logger.info(f"Startup: Ensuring default model '{target_model}' is loaded...")
+            ensure_model_loaded(target_model)
+            llm = model_manager.current_model
+            if llm:
+                logger.info(f"Startup: Warming up model '{target_model}' compute graph with initial forward pass...")
+                with model_manager.inference_lock:
+                    warmup_out = llm("Hello world", max_tokens=4, temperature=0.7)
+                    gen_txt = warmup_out["choices"][0]["text"]
+                    logger.info(f"Startup: Model '{target_model}' is 100% warm and ready! (Warmup output: {gen_txt!r})")
         except Exception as e:
-            logger.warning(f"Startup: Could not auto-load '{target_model}': {e}")
+            logger.warning(f"Startup: Model warmup notice for '{target_model}': {e}")
 
 
 # ---------------------------------------------------------------------------

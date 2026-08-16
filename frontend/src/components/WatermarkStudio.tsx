@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useCallback } from 'react';
-import { Copy, ArrowRight, Sparkles, BookOpen, ChevronDown, ChevronUp, Key, Layers, TrendingUp, ShieldCheck, ShieldAlert } from 'lucide-react';
+import { Copy, ArrowRight, Sparkles, BookOpen, ChevronDown, ChevronUp, Key, Layers, TrendingUp, ShieldCheck, ShieldAlert, Activity } from 'lucide-react';
 import type { ModelInfo, WatermarkConfig, StreamTokenEvent } from '../types';
 
 interface Props {
@@ -41,6 +41,7 @@ export const WatermarkStudio = ({
   const [fullText, setFullText] = useState('');
   const [hoveredToken, setHoveredToken] = useState<StreamTokenEvent | null>(null);
   const [errorMessage, setErrorMessage] = useState<string | null>(null);
+  const [statusMessage, setStatusMessage] = useState<string | null>(null);
   const [copied, setCopied] = useState(false);
   const [showHowItWorks, setShowHowItWorks] = useState(false);
   const [showPromptPreview, setShowPromptPreview] = useState(false);
@@ -61,6 +62,7 @@ export const WatermarkStudio = ({
     setTokens([]);
     setFullText('');
     setErrorMessage(null);
+    setStatusMessage('Connecting to generation worker...');
 
     const controller = new AbortController();
     abortControllerRef.current = controller;
@@ -120,15 +122,20 @@ export const WatermarkStudio = ({
             try {
               const data = JSON.parse(dataStr);
               if (data.type === 'token') {
+                setStatusMessage(null);
                 setTokens((prev) => [...prev, data]);
                 accumulatedText += data.text;
                 setFullText(accumulatedText);
+              } else if (data.type === 'status') {
+                setStatusMessage(data.message);
               } else if (data.type === 'done') {
+                setStatusMessage(null);
                 if (data.full_text) {
                   setFullText(data.full_text);
                 }
               } else if (data.type === 'error') {
-                setErrorMessage(data.message);
+                setStatusMessage(null);
+                setErrorMessage(data.message + (data.details ? `\n${data.details}` : ''));
               }
             } catch (e) {
               console.error('Error parsing SSE event:', e);
@@ -388,6 +395,13 @@ export const WatermarkStudio = ({
               </div>
             )}
 
+            {tokens.length === 0 && isGenerating && (
+              <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', gap: '10px', color: 'var(--brand-cyan)', padding: '40px 0', fontSize: '0.88rem' }}>
+                <Activity size={16} className="spin" />
+                <span>{statusMessage || 'Evaluating prompt context and generating tokens...'}</span>
+              </div>
+            )}
+
             {tokens.map((tok, i) => (
               <span
                 key={i}
@@ -399,7 +413,7 @@ export const WatermarkStudio = ({
               </span>
             ))}
 
-            {isGenerating && <span className="stream-cursor" />}
+            {isGenerating && tokens.length > 0 && <span className="stream-cursor" />}
           </div>
 
           {/* Reserved Token Inspector Bar (prevents layout shift / cursor flickering) */}
