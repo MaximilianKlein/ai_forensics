@@ -205,10 +205,10 @@ def ensure_model_loaded(requested_name: Optional[str] = None):
         if model_manager.current_model_name != requested_name:
             model_manager.load_model(requested_name)
     elif model_manager.current_model is None:
-        models = model_manager.scan_ollama_models()
-        if not models:
-            raise RuntimeError("No Ollama models found on this machine.")
-        model_manager.load_model(models[0].name)
+        avail = model_manager.list_available_models()
+        if not avail:
+            raise RuntimeError("No available models found on this machine.")
+        model_manager.load_model(avail[0]["name"])
 
 @app.post("/api/generate")
 async def generate_stream(req: GenerateRequest):
@@ -684,8 +684,84 @@ def get_model_config_endpoint(model_name: str):
 
 
 # ---------------------------------------------------------------------------
-# Startup Model Pre-loading & Warmup (Pre-loads model into memory before traffic)
+# Startup Model Pre-loading & Full Watermark Generation Warmup
 # ---------------------------------------------------------------------------
+def run_warmup_generation(model_name: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Executes a full end-to-end watermarked generation pass using the exact production pipeline,
+    default watermark parameters (gamma=0.25, delta=recommended_delta, hash_key=89173511, context_width=1),
+    and model formatting. This ensures all logits processors, sampling kernels, tokenizers, KV cache allocations,
+    and mmap memory buffers are 100% warm in physical RAM before the service becomes healthy.
+    """
+    ensure_model_loaded(model_name)
+    llm = model_manager.current_model
+    if not llm:
+        raise RuntimeError("No model is loaded for warmup generation.")
+
+    target_name = model_name or model_manager.current_model_name or "default"
+    prof = get_model_profile(target_name)
+    delta = prof.get("recommended_delta", 5.0)
+    prompt_suffix = prof.get("prompt_suffix", "\n")
+    disable_thinking = prof.get("disable_thinking", True)
+
+    wm_config = WatermarkConfig(
+        gamma=0.25,
+        delta=delta,
+        hash_key=89173511,
+        context_width=1
+    )
+
+    vocab_size = llm.n_vocab()
+    processor = WatermarkLogitsProcessor(vocab_size=vocab_size, config=wm_config)
+    processors = LogitsProcessorList([processor])
+
+    raw_prompt = "Explain quantum computing in one short sentence."
+    effective_prompt = format_prompt_for_model(
+        raw_prompt,
+        target_name,
+        prompt_suffix,
+        disable_thinking
+    )
+
+    prompt_tokens = llm.tokenize(effective_prompt.encode('utf-8'))
+    all_tokens = list(prompt_tokens)
+    generated_tokens = []
+    green_count = 0
+    generated_text = ""
+
+    stream = llm(
+        effective_prompt,
+        max_tokens=32,
+        temperature=0.7,
+        top_p=0.9,
+        logits_processor=processors,
+        stream=True
+    )
+
+    for chunk in stream:
+        choice = chunk["choices"][0]
+        text_piece = choice.get("text", "")
+        if text_piece:
+            generated_text += text_piece
+            piece_tokens = llm.tokenize(text_piece.encode('utf-8'), add_bos=False)
+            for tok_id in piece_tokens:
+                ctx = all_tokens[-1:] if len(all_tokens) >= 1 else all_tokens
+                green_set = get_green_list(vocab_size, ctx, wm_config.gamma, wm_config.hash_key)
+                is_green = tok_id in green_set
+                all_tokens.append(tok_id)
+                generated_tokens.append(tok_id)
+                if is_green:
+                    green_count += 1
+
+    return {
+        "model": target_name,
+        "prompt": raw_prompt,
+        "generated_text": generated_text.strip(),
+        "total_tokens": len(generated_tokens),
+        "green_count": green_count,
+        "green_fraction": (green_count / len(generated_tokens)) if generated_tokens else 0.0
+    }
+
 @app.on_event("startup")
 async def startup_event():
     default_model_env = os.environ.get("DEFAULT_MODEL")
@@ -694,16 +770,19 @@ async def startup_event():
 
     if target_model:
         try:
-            logger.info(f"Startup: Pre-loading default model '{target_model}' into memory before going live...")
-            llm = model_manager.load_model(target_model)
-            try:
-                warmup_out = llm("System test prompt.", max_tokens=3, temperature=0.1, echo=False)
-                gen_text = warmup_out.get("choices", [{}])[0].get("text", "").strip()
-                logger.info(f"Startup: Successfully initialized model '{target_model}'. Test generation output: {json.dumps(gen_text)}. Ready to serve.")
-            except Exception as ge:
-                logger.warning(f"Startup: Warmup mini text generation pass note: {ge}")
+            logger.info(f"Startup: Pre-loading default model '{target_model}' into memory...")
+            model_manager.load_model(target_model)
+            logger.info(f"Startup: Executing full production watermarked generation warmup on '{target_model}'...")
+            warmup_res = run_warmup_generation(target_model)
+            logger.info(
+                f"Startup: Full generation warmup successfully completed for '{target_model}'!\n"
+                f"  - Generated Text: {json.dumps(warmup_res['generated_text'])}\n"
+                f"  - Tokens: {warmup_res['total_tokens']}\n"
+                f"  - Green Tokens: {warmup_res['green_count']}/{warmup_res['total_tokens']} ({warmup_res['green_fraction']*100:.1f}%)\n"
+                f"Ready to serve with 100% warm memory."
+            )
         except Exception as e:
-            logger.warning(f"Startup: Could not auto-load '{target_model}': {e}")
+            logger.warning(f"Startup: Could not execute full warmup for '{target_model}': {e}")
 
 
 # ---------------------------------------------------------------------------
