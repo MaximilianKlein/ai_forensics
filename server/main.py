@@ -231,186 +231,189 @@ async def generate_stream(req: GenerateRequest):
         req.disable_thinking
     )
 
+    loop = asyncio.get_running_loop()
+    queue: asyncio.Queue = asyncio.Queue()
+
+    def run_inference_worker():
+        with model_manager.inference_lock:
+            try:
+                prompt_tokens = llm.tokenize(effective_prompt.encode('utf-8'))
+                all_tokens = list(prompt_tokens)
+                generated_tokens = []
+                green_count = 0
+                h = max(1, req.context_width)
+
+                stream = llm(
+                    effective_prompt,
+                    max_tokens=req.max_tokens,
+                    temperature=req.temperature,
+                    top_p=req.top_p,
+                    logits_processor=processors,
+                    stream=True
+                )
+
+                for chunk in stream:
+                    choice = chunk["choices"][0]
+                    text_piece = choice.get("text", "")
+
+                    if text_piece:
+                        piece_tokens = llm.tokenize(text_piece.encode('utf-8'), add_bos=False)
+                        for tok_id in piece_tokens:
+                            ctx = all_tokens[-h:] if len(all_tokens) >= h else all_tokens
+                            green_set = get_green_list(vocab_size, ctx, req.gamma, req.hash_key)
+                            is_green = tok_id in green_set
+
+                            all_tokens.append(tok_id)
+                            generated_tokens.append(tok_id)
+                            if is_green:
+                                green_count += 1
+
+                            N_eval = len(generated_tokens)
+                            green_pct = (green_count / N_eval) * 100 if N_eval > 0 else 0.0
+
+                            std_dev = (N_eval * req.gamma * (1.0 - req.gamma)) ** 0.5
+                            z_score = (green_count - (N_eval * req.gamma)) / std_dev if std_dev > 0 else 0.0
+
+                            token_payload = {
+                                "type": "token",
+                                "token_id": tok_id,
+                                "text": model_manager.decode_tokens([tok_id]),
+                                "is_green": is_green,
+                                "green_count": green_count,
+                                "total_generated": N_eval,
+                                "green_fraction": round(green_pct / 100.0, 4),
+                                "z_score": round(z_score, 2),
+                                "finish_reason": choice.get("finish_reason")
+                            }
+                            loop.call_soon_threadsafe(queue.put_nowait, token_payload)
+
+                # Final stats
+                full_text = model_manager.decode_tokens(generated_tokens)
+                detection = detect_watermark(
+                    generated_tokens,
+                    tokenizer_decode_fn=model_manager.decode_tokens,
+                    vocab_size=vocab_size,
+                    config=wm_config
+                )
+                done_payload = {
+                    "type": "done",
+                    "full_text": full_text,
+                    "stats": detection.dict()
+                }
+                loop.call_soon_threadsafe(queue.put_nowait, done_payload)
+
+            except Exception as e:
+                logger.error(f"Inference error: {e}", exc_info=True)
+                loop.call_soon_threadsafe(queue.put_nowait, {"type": "error", "message": str(e)})
+            finally:
+                loop.call_soon_threadsafe(queue.put_nowait, None)
+
+    # Launch worker in background thread to avoid event-loop blocking
+    threading.Thread(target=run_inference_worker, daemon=True, name="InferenceWorker").start()
+
     async def event_generator():
         yield f"data: {json.dumps({'type': 'start', 'config': wm_config.dict(), 'vocab_size': vocab_size, 'effective_prompt': effective_prompt})}\n\n"
-        
-        prompt_tokens = llm.tokenize(effective_prompt.encode('utf-8'))
-        all_tokens = list(prompt_tokens)
-        generated_tokens = []
-        green_count = 0
-        h = max(1, req.context_width)
-
-        try:
-            stream = await asyncio.to_thread(
-                llm,
-                effective_prompt,
-                max_tokens=req.max_tokens,
-                temperature=req.temperature,
-                top_p=req.top_p,
-                logits_processor=processors,
-                stream=True
-            )
-            stream_iter = iter(stream)
-
-            while True:
-                chunk = await asyncio.to_thread(next, stream_iter, None)
-                if chunk is None:
-                    break
-
-                choice = chunk["choices"][0]
-                text_piece = choice.get("text", "")
-                
-                # Check if we have token id info or need to tokenize
-                # In llama-cpp-python streaming, text_piece arrives per token
-                if text_piece:
-                    piece_tokens = llm.tokenize(text_piece.encode('utf-8'), add_bos=False)
-                    for tok_id in piece_tokens:
-                        # Determine if this token was on the green list
-                        ctx = all_tokens[-h:] if len(all_tokens) >= h else all_tokens
-                        green_set = get_green_list(vocab_size, ctx, req.gamma, req.hash_key)
-                        is_green = tok_id in green_set
-                        
-                        all_tokens.append(tok_id)
-                        generated_tokens.append(tok_id)
-                        if is_green:
-                            green_count += 1
-                            
-                        N_eval = len(generated_tokens)
-                        green_pct = (green_count / N_eval) * 100 if N_eval > 0 else 0.0
-                        
-                        # Calculate current z-score
-                        std_dev = (N_eval * req.gamma * (1.0 - req.gamma)) ** 0.5
-                        z_score = (green_count - (N_eval * req.gamma)) / std_dev if std_dev > 0 else 0.0
-                        
-                        token_payload = {
-                            "type": "token",
-                            "token_id": tok_id,
-                            "text": model_manager.decode_tokens([tok_id]),
-                            "is_green": is_green,
-                            "green_count": green_count,
-                            "total_generated": N_eval,
-                            "green_fraction": round(green_pct / 100.0, 4),
-                            "z_score": round(z_score, 2),
-                            "finish_reason": choice.get("finish_reason")
-                        }
-                        yield f"data: {json.dumps(token_payload)}\n\n"
-                        await asyncio.sleep(0.002)
-
-            # Final complete stats
-            full_text = model_manager.decode_tokens(generated_tokens)
-            detection = detect_watermark(
-                generated_tokens,
-                tokenizer_decode_fn=model_manager.decode_tokens,
-                vocab_size=vocab_size,
-                config=wm_config
-            )
-
-            done_payload = {
-                "type": "done",
-                "full_text": full_text,
-                "stats": detection.dict()
-            }
-            yield f"data: {json.dumps(done_payload)}\n\n"
-
-        except Exception as e:
-            logger.error(f"Generation error: {e}", exc_info=True)
-            yield f"data: {json.dumps({'type': 'error', 'message': str(e)})}\n\n"
+        while True:
+            item = await queue.get()
+            if item is None:
+                break
+            yield f"data: {json.dumps(item)}\n\n"
 
     return StreamingResponse(event_generator(), media_type="text/event-stream")
 
 @app.post("/api/detect")
 def detect_endpoint(req: DetectRequest):
-    ensure_model_loaded(req.model_name)
-    llm = model_manager.current_model
-    vocab_size = llm.n_vocab()
+    with model_manager.inference_lock:
+        ensure_model_loaded(req.model_name)
+        llm = model_manager.current_model
+        vocab_size = llm.n_vocab()
 
-    tokens = llm.tokenize(req.text.encode('utf-8'))
-    wm_config = WatermarkConfig(
-        gamma=req.gamma,
-        hash_key=req.hash_key,
-        context_width=req.context_width
-    )
+        tokens = llm.tokenize(req.text.encode('utf-8'))
+        wm_config = WatermarkConfig(
+            gamma=req.gamma,
+            hash_key=req.hash_key,
+            context_width=req.context_width
+        )
 
-    result = detect_watermark(
-        tokens=tokens,
-        tokenizer_decode_fn=model_manager.decode_tokens,
-        vocab_size=vocab_size,
-        config=wm_config,
-        z_threshold=req.z_threshold
-    )
+        result = detect_watermark(
+            tokens=tokens,
+            tokenizer_decode_fn=model_manager.decode_tokens,
+            vocab_size=vocab_size,
+            config=wm_config,
+            z_threshold=req.z_threshold
+        )
 
-    return result.dict()
+        return result.dict()
 
 @app.post("/api/compare")
-async def compare_endpoint(req: CompareRequest):
+def compare_endpoint(req: CompareRequest):
     """
     Generates two completions for the same prompt: one unwatermarked (delta=0) and one watermarked (delta > 0)
     """
-    ensure_model_loaded(req.model_name)
-    llm = model_manager.current_model
-    vocab_size = llm.n_vocab()
+    with model_manager.inference_lock:
+        ensure_model_loaded(req.model_name)
+        llm = model_manager.current_model
+        vocab_size = llm.n_vocab()
 
-    target_model_name = req.model_name or model_manager.current_model_name
-    effective_prompt = format_prompt_for_model(
-        req.prompt,
-        target_model_name,
-        req.prompt_suffix,
-        disable_thinking
-    )
+        target_model_name = req.model_name or model_manager.current_model_name
+        effective_prompt = format_prompt_for_model(
+            req.prompt,
+            target_model_name,
+            req.prompt_suffix,
+            req.disable_thinking
+        )
 
-    # 1. Generate unwatermarked in background thread
-    unwatermarked_output = await asyncio.to_thread(
-        llm,
-        effective_prompt,
-        max_tokens=req.max_tokens,
-        temperature=req.temperature,
-        logits_processor=LogitsProcessorList([])
-    )
-    unwatermarked_text = unwatermarked_output["choices"][0]["text"]
-    unwatermarked_tokens = llm.tokenize(unwatermarked_text.encode('utf-8'), add_bos=False)
+        # 1. Generate unwatermarked
+        unwatermarked_output = llm(
+            effective_prompt,
+            max_tokens=req.max_tokens,
+            temperature=req.temperature,
+            logits_processor=LogitsProcessorList([])
+        )
+        unwatermarked_text = unwatermarked_output["choices"][0]["text"]
+        unwatermarked_tokens = llm.tokenize(unwatermarked_text.encode('utf-8'), add_bos=False)
 
-    # 2. Generate watermarked in background thread
-    wm_config = WatermarkConfig(
-        gamma=req.gamma,
-        delta=req.delta,
-        hash_key=req.hash_key,
-        context_width=req.context_width
-    )
-    processor = WatermarkLogitsProcessor(vocab_size=vocab_size, config=wm_config)
-    watermarked_output = await asyncio.to_thread(
-        llm,
-        effective_prompt,
-        max_tokens=req.max_tokens,
-        temperature=req.temperature,
-        logits_processor=LogitsProcessorList([processor])
-    )
-    watermarked_text = watermarked_output["choices"][0]["text"]
-    watermarked_tokens = llm.tokenize(watermarked_text.encode('utf-8'), add_bos=False)
+        # 2. Generate watermarked
+        wm_config = WatermarkConfig(
+            gamma=req.gamma,
+            delta=req.delta,
+            hash_key=req.hash_key,
+            context_width=req.context_width
+        )
+        processor = WatermarkLogitsProcessor(vocab_size=vocab_size, config=wm_config)
+        watermarked_output = llm(
+            effective_prompt,
+            max_tokens=req.max_tokens,
+            temperature=req.temperature,
+            logits_processor=LogitsProcessorList([processor])
+        )
+        watermarked_text = watermarked_output["choices"][0]["text"]
+        watermarked_tokens = llm.tokenize(watermarked_text.encode('utf-8'), add_bos=False)
 
-    # 3. Detect on both
-    unwatermarked_stats = detect_watermark(
-        unwatermarked_tokens,
-        tokenizer_decode_fn=model_manager.decode_tokens,
-        vocab_size=vocab_size,
-        config=wm_config
-    )
-    watermarked_stats = detect_watermark(
-        watermarked_tokens,
-        tokenizer_decode_fn=model_manager.decode_tokens,
-        vocab_size=vocab_size,
-        config=wm_config
-    )
+        # 3. Detect on both
+        unwatermarked_stats = detect_watermark(
+            unwatermarked_tokens,
+            tokenizer_decode_fn=model_manager.decode_tokens,
+            vocab_size=vocab_size,
+            config=wm_config
+        )
+        watermarked_stats = detect_watermark(
+            watermarked_tokens,
+            tokenizer_decode_fn=model_manager.decode_tokens,
+            vocab_size=vocab_size,
+            config=wm_config
+        )
 
-    return {
-        "unwatermarked": {
-            "text": unwatermarked_text,
-            "stats": unwatermarked_stats.dict()
-        },
-        "watermarked": {
-            "text": watermarked_text,
-            "stats": watermarked_stats.dict()
+        return {
+            "unwatermarked": {
+                "text": unwatermarked_text,
+                "stats": unwatermarked_stats.dict()
+            },
+            "watermarked": {
+                "text": watermarked_text,
+                "stats": watermarked_stats.dict()
+            }
         }
-    }
 
 @app.get("/api/benchmark/results")
 def get_benchmark_results():
@@ -685,108 +688,21 @@ def get_model_config_endpoint(model_name: str):
 
 
 # ---------------------------------------------------------------------------
-# Startup Model Pre-loading & Full Watermark Generation Warmup
+# Startup Model Auto-Loading
 # ---------------------------------------------------------------------------
-def run_warmup_generation(model_name: Optional[str] = None) -> Dict[str, Any]:
-    """
-    Executes a full end-to-end watermarked generation pass using the exact production pipeline,
-    default watermark parameters (gamma=0.25, delta=recommended_delta, hash_key=89173511, context_width=1),
-    and model formatting. This ensures all logits processors, sampling kernels, tokenizers, KV cache allocations,
-    and mmap memory buffers are 100% warm in physical RAM.
-    """
-    ensure_model_loaded(model_name)
-    llm = model_manager.current_model
-    if not llm:
-        raise RuntimeError("No model is loaded for warmup generation.")
-
-    target_name = model_name or model_manager.current_model_name or "default"
-    prof = get_model_profile(target_name)
-    delta = prof.get("recommended_delta", 5.0)
-    prompt_suffix = prof.get("prompt_suffix", "\n")
-    disable_thinking = prof.get("disable_thinking", True)
-
-    wm_config = WatermarkConfig(
-        gamma=0.25,
-        delta=delta,
-        hash_key=89173511,
-        context_width=1
-    )
-
-    vocab_size = llm.n_vocab()
-    processor = WatermarkLogitsProcessor(vocab_size=vocab_size, config=wm_config)
-    processors = LogitsProcessorList([processor])
-
-    raw_prompt = "Explain quantum computing in one short sentence."
-    effective_prompt = format_prompt_for_model(
-        raw_prompt,
-        target_name,
-        prompt_suffix,
-        disable_thinking
-    )
-
-    prompt_tokens = llm.tokenize(effective_prompt.encode('utf-8'))
-    all_tokens = list(prompt_tokens)
-    generated_tokens = []
-    green_count = 0
-    generated_text = ""
-
-    stream = llm(
-        effective_prompt,
-        max_tokens=24,
-        temperature=0.7,
-        top_p=0.9,
-        logits_processor=processors,
-        stream=True
-    )
-
-    for chunk in stream:
-        choice = chunk["choices"][0]
-        text_piece = choice.get("text", "")
-        if text_piece:
-            generated_text += text_piece
-            piece_tokens = llm.tokenize(text_piece.encode('utf-8'), add_bos=False)
-            for tok_id in piece_tokens:
-                ctx = all_tokens[-1:] if len(all_tokens) >= 1 else all_tokens
-                green_set = get_green_list(vocab_size, ctx, wm_config.gamma, wm_config.hash_key)
-                is_green = tok_id in green_set
-                all_tokens.append(tok_id)
-                generated_tokens.append(tok_id)
-                if is_green:
-                    green_count += 1
-
-    return {
-        "model": target_name,
-        "prompt": raw_prompt,
-        "generated_text": generated_text.strip(),
-        "total_tokens": len(generated_tokens),
-        "green_count": green_count,
-        "green_fraction": (green_count / len(generated_tokens)) if generated_tokens else 0.0
-    }
-
 @app.on_event("startup")
-async def startup_event():
+def startup_event():
     default_model_env = os.environ.get("DEFAULT_MODEL")
     avail = model_manager.list_available_models()
     target_model = default_model_env or (avail[0]["name"] if avail else None)
 
     if target_model:
-        def bg_startup():
-            try:
-                logger.info(f"Startup: Pre-loading default model '{target_model}' in background...")
-                model_manager.load_model(target_model)
-                logger.info(f"Startup: Running full watermarked generation warmup on '{target_model}'...")
-                warmup_res = run_warmup_generation(target_model)
-                logger.info(
-                    f"Startup: Warmup generation complete for '{target_model}'!\n"
-                    f"  - Generated Text: {json.dumps(warmup_res['generated_text'])}\n"
-                    f"  - Tokens: {warmup_res['total_tokens']}\n"
-                    f"  - Green Tokens: {warmup_res['green_count']}/{warmup_res['total_tokens']} ({warmup_res['green_fraction']*100:.1f}%)\n"
-                    f"Model is fully warm and ready."
-                )
-            except Exception as e:
-                logger.warning(f"Startup: Could not run warmup generation for '{target_model}': {e}")
-
-        threading.Thread(target=bg_startup, daemon=True, name="StartupModelWarmup").start()
+        try:
+            logger.info(f"Startup: Auto-loading default model '{target_model}'...")
+            model_manager.load_model(target_model)
+            logger.info(f"Startup: Successfully loaded model '{target_model}'.")
+        except Exception as e:
+            logger.warning(f"Startup: Could not auto-load '{target_model}': {e}")
 
 
 # ---------------------------------------------------------------------------

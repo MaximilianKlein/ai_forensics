@@ -46,6 +46,7 @@ class ModelManager:
         self.loading_model_name: Optional[str] = None
         self.load_error: Optional[str] = None
         self._load_lock = threading.Lock()
+        self.inference_lock = threading.Lock()
 
     def get_status(self) -> Dict[str, Any]:
         if self.is_loading:
