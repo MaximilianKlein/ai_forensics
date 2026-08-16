@@ -1,0 +1,234 @@
+import os
+import glob
+import json
+import logging
+from typing import List, Dict, Any, Optional
+from llama_cpp import Llama
+
+logger = logging.getLogger(__name__)
+
+try:
+    from server.delta_calibrator import get_model_profile
+except ImportError:
+    from delta_calibrator import get_model_profile
+
+class ModelInfo:
+    def __init__(self, name: str, path: str, size_gb: float, is_ollama: bool = True):
+        self.name = name
+        self.path = path
+        self.size_gb = size_gb
+        self.is_ollama = is_ollama
+        profile = get_model_profile(name)
+        self.recommended_delta = profile.get("recommended_delta", 3.0)
+        self.prompt_suffix = profile.get("prompt_suffix", "\n")
+        self.disable_thinking = profile.get("disable_thinking", True)
+
+    def to_dict(self) -> Dict[str, Any]:
+        return {
+            "name": self.name,
+            "path": self.path,
+            "size_gb": self.size_gb,
+            "is_ollama": self.is_ollama,
+            "recommended_delta": self.recommended_delta,
+            "prompt_suffix": self.prompt_suffix,
+            "disable_thinking": self.disable_thinking
+        }
+
+class ModelManager:
+    def __init__(self):
+        self.current_model: Optional[Llama] = None
+        self.current_model_name: Optional[str] = None
+        self.current_model_path: Optional[str] = None
+
+    def scan_directory_models(self) -> List[ModelInfo]:
+        """
+        Scans standalone .gguf model files in configured or standard model directories
+        (e.g., /models, ./models, or MODELS_DIR env var).
+        """
+        candidate_dirs = [
+            os.environ.get("MODELS_DIR", ""),
+            "/models",
+            "./models",
+            os.path.abspath(os.path.join(os.path.dirname(__file__), "..", "models"))
+        ]
+        models_dict: Dict[str, ModelInfo] = {}
+
+        for c_dir in candidate_dirs:
+            if not c_dir or not os.path.exists(c_dir) or not os.path.isdir(c_dir):
+                continue
+
+            for ext in ("*.gguf", "*.bin"):
+                for model_file in glob.glob(os.path.join(c_dir, ext)):
+                    if not os.path.isfile(model_file):
+                        continue
+                    
+                    basename = os.path.basename(model_file)
+                    lower_base = basename.lower()
+                    
+                    # Compute friendly alias name
+                    if "qwen2.5-0.5b" in lower_base or "qwen2.5_0.5b" in lower_base:
+                        alias_name = "qwen2.5:0.5b"
+                    elif "qwen2.5-1.5b" in lower_base or "qwen2.5_1.5b" in lower_base:
+                        alias_name = "qwen2.5:1.5b"
+                    elif "gemma" in lower_base and "12b" in lower_base:
+                        alias_name = "gemma4:12b"
+                    elif "gemma" in lower_base and "2b" in lower_base:
+                        alias_name = "gemma:2b"
+                    elif "llama-3" in lower_base or "llama3" in lower_base:
+                        alias_name = "llama3:latest"
+                    else:
+                        alias_name = os.path.splitext(basename)[0]
+
+                    size_gb = round(os.path.getsize(model_file) / (1024**3), 2)
+                    if alias_name not in models_dict:
+                        models_dict[alias_name] = ModelInfo(
+                            alias_name,
+                            os.path.abspath(model_file),
+                            size_gb,
+                            is_ollama=False
+                        )
+                        # Also register exact filename as alternative lookup
+                        if basename != alias_name and basename not in models_dict:
+                            models_dict[basename] = ModelInfo(
+                                basename,
+                                os.path.abspath(model_file),
+                                size_gb,
+                                is_ollama=False
+                            )
+
+        return list(models_dict.values())
+
+    def scan_ollama_models(self) -> List[ModelInfo]:
+        """
+        Discovers models managed by Ollama by reading the manifest directory.
+        Deduplicates by model name and blob path.
+        """
+        manifest_dir = os.path.expanduser("~/.ollama/models/manifests")
+        blobs_dir = os.path.expanduser("~/.ollama/models/blobs")
+        models_dict: Dict[str, ModelInfo] = {}
+
+        if not os.path.exists(manifest_dir):
+            return []
+
+        for root, _, files in os.walk(manifest_dir):
+            for file in files:
+                manifest_path = os.path.join(root, file)
+                try:
+                    with open(manifest_path, 'r', encoding='utf-8') as f:
+                        data = json.load(f)
+                    rel_name = os.path.relpath(manifest_path, manifest_dir)
+                    clean_name = (
+                        rel_name.replace("registry.ollama.ai/library/", "")
+                        .replace("registry.ollama.ai/", "")
+                        .replace("/", ":")
+                    )
+
+                    for layer in data.get("layers", []):
+                        if layer.get("mediaType") == "application/vnd.ollama.image.model":
+                            digest = layer.get("digest", "").replace("sha256:", "sha256-")
+                            blob_path = os.path.join(blobs_dir, digest)
+                            if os.path.exists(blob_path) and clean_name not in models_dict:
+                                size_gb = round(os.path.getsize(blob_path) / (1024**3), 2)
+                                models_dict[clean_name] = ModelInfo(clean_name, blob_path, size_gb, is_ollama=True)
+                except Exception as e:
+                    logger.debug(f"Skipping {manifest_path}: {e}")
+
+        # Prioritize smaller/standard models first
+        result = list(models_dict.values())
+        result.sort(key=lambda m: (m.size_gb, m.name))
+        return result
+
+    def list_available_models(self) -> List[Dict[str, Any]]:
+        dir_models = self.scan_directory_models()
+        ollama_models = self.scan_ollama_models()
+
+        seen_paths = set()
+        combined: List[ModelInfo] = []
+
+        for m in dir_models + ollama_models:
+            if m.path not in seen_paths:
+                seen_paths.add(m.path)
+                combined.append(m)
+
+        combined.sort(key=lambda m: (m.size_gb, m.name))
+        return [m.to_dict() for m in combined]
+
+    def load_model(self, model_name_or_path: str, n_ctx: Optional[int] = None, n_gpu_layers: Optional[int] = None) -> Llama:
+        """
+        Loads a GGUF model into memory or returns cached instance if already loaded.
+        Respects environment variables for low-memory Render deployments (LLAMA_N_CTX, LLAMA_N_THREADS).
+        """
+        # Resolve target path
+        target_path = model_name_or_path
+        all_models = self.scan_directory_models() + self.scan_ollama_models()
+
+        if not os.path.isfile(model_name_or_path):
+            for m in all_models:
+                if (
+                    m.name == model_name_or_path
+                    or m.name.startswith(model_name_or_path)
+                    or os.path.basename(m.path) == model_name_or_path
+                    or os.path.splitext(os.path.basename(m.path))[0] == model_name_or_path
+                ):
+                    target_path = m.path
+                    break
+
+        if not os.path.isfile(target_path):
+            raise FileNotFoundError(f"Model file not found for '{model_name_or_path}' at '{target_path}'")
+
+        if self.current_model is not None and self.current_model_path == target_path:
+            return self.current_model
+
+        if self.current_model is not None:
+            del self.current_model
+            self.current_model = None
+
+        # Environment variable overrides for resource-constrained environments
+        effective_n_ctx = n_ctx if n_ctx is not None else int(os.environ.get("LLAMA_N_CTX", 2048))
+        effective_n_gpu_layers = n_gpu_layers if n_gpu_layers is not None else int(os.environ.get("LLAMA_N_GPU_LAYERS", -1))
+        effective_n_threads = int(os.environ.get("LLAMA_N_THREADS", max(1, os.cpu_count() or 1)))
+
+        logger.info(f"Loading model from {target_path} (n_ctx={effective_n_ctx}, n_threads={effective_n_threads}, n_gpu_layers={effective_n_gpu_layers})...")
+        try:
+            self.current_model = Llama(
+                model_path=target_path,
+                n_ctx=effective_n_ctx,
+                n_threads=effective_n_threads,
+                n_gpu_layers=effective_n_gpu_layers,
+                verbose=False
+            )
+            self.current_model_path = target_path
+            self.current_model_name = model_name_or_path
+            return self.current_model
+        except Exception as e:
+            err_msg = str(e)
+            if "dimension_sections" in err_msg or "hyperparameters" in err_msg or "architecture" in err_msg:
+                raise ValueError(
+                    f"Model '{model_name_or_path}' has an experimental or vision architecture unsupported by current llama.cpp. "
+                    f"Please select a standard text model (e.g. qwen2.5:0.5b, llama3.2, mistral)."
+                ) from e
+            raise e
+
+    def get_loaded_model(self) -> Optional[Llama]:
+        return self.current_model
+
+    def decode_token(self, token_id: int) -> str:
+        if not self.current_model:
+            return ""
+        try:
+            return self.current_model.detokenize([token_id]).decode('utf-8', errors='replace')
+        except Exception:
+            return ""
+
+    def decode_tokens(self, token_ids: List[int]) -> str:
+        if not self.current_model:
+            return ""
+        try:
+            return self.current_model.detokenize(token_ids).decode('utf-8', errors='replace')
+        except Exception:
+            return ""
+
+    def tokenize(self, text: str) -> List[int]:
+        if not self.current_model:
+            raise RuntimeError("No model is loaded")
+        return self.current_model.tokenize(text.encode('utf-8'))

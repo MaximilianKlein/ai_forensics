@@ -1,0 +1,20 @@
+services:
+  - type: web
+    name: ai-forensics
+    runtime: docker
+    dockerfilePath: ./Dockerfile
+    plan: free
+    region: oregon
+    envVars:
+      - key: PORT
+        value: 10000
+      - key: MODELS_DIR
+        value: /models
+      - key: DEFAULT_MODEL
+        value: qwen2.5:0.5b
+      - key: LLAMA_N_CTX
+        value: 1024
+      - key: LLAMA_N_THREADS
+        value: 1
+      - key: LLAMA_N_GPU_LAYERS
+        value: 0

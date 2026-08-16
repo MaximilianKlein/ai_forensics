@@ -1,0 +1,12 @@
+{
+  "name": "llm-text-watermarking",
+  "version": "1.0.0",
+  "description": "LLM Text Watermarking and Detection Studio with local Ollama models",
+  "scripts": {
+    "dev:backend": ".venv/bin/uvicorn server.main:app --host 127.0.0.1 --port 8000 --reload",
+    "dev:frontend": "cd frontend && pnpm dev",
+    "dev": "./run.sh",
+    "build": "cd frontend && pnpm build",
+    "test": ".venv/bin/python -m unittest discover -s tests"
+  }
+}
