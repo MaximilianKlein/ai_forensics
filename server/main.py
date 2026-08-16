@@ -241,7 +241,8 @@ async def generate_stream(req: GenerateRequest):
         h = max(1, req.context_width)
 
         try:
-            stream = llm(
+            stream = await asyncio.to_thread(
+                llm,
                 effective_prompt,
                 max_tokens=req.max_tokens,
                 temperature=req.temperature,
@@ -249,8 +250,13 @@ async def generate_stream(req: GenerateRequest):
                 logits_processor=processors,
                 stream=True
             )
+            stream_iter = iter(stream)
 
-            for chunk in stream:
+            while True:
+                chunk = await asyncio.to_thread(next, stream_iter, None)
+                if chunk is None:
+                    break
+
                 choice = chunk["choices"][0]
                 text_piece = choice.get("text", "")
                 
@@ -288,7 +294,7 @@ async def generate_stream(req: GenerateRequest):
                             "finish_reason": choice.get("finish_reason")
                         }
                         yield f"data: {json.dumps(token_payload)}\n\n"
-                        await asyncio.sleep(0.005)
+                        await asyncio.sleep(0.002)
 
             # Final complete stats
             full_text = model_manager.decode_tokens(generated_tokens)
@@ -349,11 +355,12 @@ async def compare_endpoint(req: CompareRequest):
         req.prompt,
         target_model_name,
         req.prompt_suffix,
-        req.disable_thinking
+        disable_thinking
     )
 
-    # 1. Generate unwatermarked
-    unwatermarked_output = llm(
+    # 1. Generate unwatermarked in background thread
+    unwatermarked_output = await asyncio.to_thread(
+        llm,
         effective_prompt,
         max_tokens=req.max_tokens,
         temperature=req.temperature,
@@ -362,7 +369,7 @@ async def compare_endpoint(req: CompareRequest):
     unwatermarked_text = unwatermarked_output["choices"][0]["text"]
     unwatermarked_tokens = llm.tokenize(unwatermarked_text.encode('utf-8'), add_bos=False)
 
-    # 2. Generate watermarked
+    # 2. Generate watermarked in background thread
     wm_config = WatermarkConfig(
         gamma=req.gamma,
         delta=req.delta,
@@ -370,7 +377,8 @@ async def compare_endpoint(req: CompareRequest):
         context_width=req.context_width
     )
     processor = WatermarkLogitsProcessor(vocab_size=vocab_size, config=wm_config)
-    watermarked_output = llm(
+    watermarked_output = await asyncio.to_thread(
+        llm,
         effective_prompt,
         max_tokens=req.max_tokens,
         temperature=req.temperature,
@@ -762,20 +770,23 @@ async def startup_event():
     target_model = default_model_env or (avail[0]["name"] if avail else None)
 
     if target_model:
-        try:
-            logger.info(f"Startup: Pre-loading default model '{target_model}' into memory...")
-            model_manager.load_model(target_model)
-            logger.info(f"Startup: Running full watermarked generation warmup on '{target_model}'...")
-            warmup_res = run_warmup_generation(target_model)
-            logger.info(
-                f"Startup: Warmup generation complete for '{target_model}'!\n"
-                f"  - Generated Text: {json.dumps(warmup_res['generated_text'])}\n"
-                f"  - Tokens: {warmup_res['total_tokens']}\n"
-                f"  - Green Tokens: {warmup_res['green_count']}/{warmup_res['total_tokens']} ({warmup_res['green_fraction']*100:.1f}%)\n"
-                f"Model is fully warm and ready."
-            )
-        except Exception as e:
-            logger.warning(f"Startup: Could not run warmup generation for '{target_model}': {e}")
+        def bg_startup():
+            try:
+                logger.info(f"Startup: Pre-loading default model '{target_model}' in background...")
+                model_manager.load_model(target_model)
+                logger.info(f"Startup: Running full watermarked generation warmup on '{target_model}'...")
+                warmup_res = run_warmup_generation(target_model)
+                logger.info(
+                    f"Startup: Warmup generation complete for '{target_model}'!\n"
+                    f"  - Generated Text: {json.dumps(warmup_res['generated_text'])}\n"
+                    f"  - Tokens: {warmup_res['total_tokens']}\n"
+                    f"  - Green Tokens: {warmup_res['green_count']}/{warmup_res['total_tokens']} ({warmup_res['green_fraction']*100:.1f}%)\n"
+                    f"Model is fully warm and ready."
+                )
+            except Exception as e:
+                logger.warning(f"Startup: Could not run warmup generation for '{target_model}': {e}")
+
+        threading.Thread(target=bg_startup, daemon=True, name="StartupModelWarmup").start()
 
 
 # ---------------------------------------------------------------------------
