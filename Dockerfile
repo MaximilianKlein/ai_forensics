@@ -20,6 +20,8 @@ FROM python:3.11-slim
 
 ENV PYTHONUNBUFFERED=1 \
     PYTHONDONTWRITEBYTECODE=1 \
+    CMAKE_BUILD_PARALLEL_LEVEL=1 \
+    MAKEFLAGS="-j1" \
     PORT=10000 \
     HOST=0.0.0.0 \
     MODELS_DIR=/models \
@@ -28,7 +30,7 @@ ENV PYTHONUNBUFFERED=1 \
     LLAMA_N_THREADS=1 \
     LLAMA_N_GPU_LAYERS=0
 
-# Install system dependencies (build tools for llama-cpp and curl for model download)
+# Install runtime dependencies (curl for model download, libgomp1 for OpenMP, build-essential as fallback)
 RUN apt-get update && apt-get install -y --no-install-recommends \
     build-essential \
     cmake \
@@ -38,10 +40,10 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 WORKDIR /app
 
-# Install Python dependencies
+# Install Python dependencies using pre-compiled wheels (avoids high-RAM source compilation)
 COPY requirements.txt .
 RUN pip install --no-cache-dir --upgrade pip && \
-    pip install --no-cache-dir -r requirements.txt
+    pip install --no-cache-dir --prefer-binary --extra-index-url https://abetlen.github.io/llama-cpp-python/whl/cpu -r requirements.txt
 
 # Download ultra-compact Qwen2.5-0.5B-Instruct in Q4_K_M GGUF format (~398 MB)
 # Ideal memory footprint for Render free & starter tier allocations
