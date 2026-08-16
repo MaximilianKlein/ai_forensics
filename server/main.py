@@ -134,27 +134,39 @@ def health():
 
 @app.get("/api/models")
 def get_models():
-    models = model_manager.scan_ollama_models()
+    models = model_manager.list_available_models()
+    
+    # Check for demo/cloud limited capabilities notice
+    demo_warning = None
+    if os.environ.get("DEMO_BANNER_MESSAGE"):
+        demo_warning = os.environ.get("DEMO_BANNER_MESSAGE")
+    elif os.environ.get("RENDER") or os.environ.get("LIMITED_CAPABILITIES_WARNING") == "true" or os.environ.get("ALLOWED_MODELS"):
+        demo_warning = "Limited AI model capabilities (0.5B) in cloud demo. Run locally with Ollama or deploy your own instance to explore full models (Gemma, LLaMA 3, DeepSeek)."
+
     if not models:
-        all_configs = get_all_calibrated_deltas()
-        fallback_models = []
-        for name, cfg in all_configs.items():
-            fallback_models.append({
-                "name": cfg.get("model_name", name),
-                "path": "",
-                "size_gb": 4.8 if "12b" in name else 1.2 if "2b" in name else 0.5,
-                "is_ollama": True,
-                "recommended_delta": cfg.get("recommended_delta", 3.0),
-                "prompt_suffix": cfg.get("prompt_suffix", "\n"),
-                "disable_thinking": cfg.get("disable_thinking", True)
-            })
-        return {
-            "models": fallback_models,
-            "current_model": model_manager.current_model_name or (fallback_models[0]["name"] if fallback_models else None)
-        }
+        allowed_env = os.environ.get("ALLOWED_MODELS", "").strip()
+        if not allowed_env:
+            all_configs = get_all_calibrated_deltas()
+            fallback_models = []
+            for name, cfg in all_configs.items():
+                fallback_models.append({
+                    "name": cfg.get("model_name", name),
+                    "path": "",
+                    "size_gb": 4.8 if "12b" in name else 1.2 if "2b" in name else 0.5,
+                    "is_ollama": True,
+                    "recommended_delta": cfg.get("recommended_delta", 3.0),
+                    "prompt_suffix": cfg.get("prompt_suffix", "\n"),
+                    "disable_thinking": cfg.get("disable_thinking", True)
+                })
+            return {
+                "models": fallback_models,
+                "current_model": model_manager.current_model_name or (fallback_models[0]["name"] if fallback_models else None),
+                "demo_warning": demo_warning
+            }
     return {
-        "models": [m.to_dict() for m in models],
-        "current_model": model_manager.current_model_name
+        "models": models,
+        "current_model": model_manager.current_model_name or (models[0]["name"] if models else None),
+        "demo_warning": demo_warning
     }
 
 @app.post("/api/models/load")

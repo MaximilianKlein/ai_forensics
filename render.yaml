@@ -11,7 +11,13 @@ services:
       - key: MODELS_DIR
         value: /models
       - key: DEFAULT_MODEL
-        value: qwen2.5:0.5b
+        value: qwen2.5-0.5b-instruct-q4_k_m.gguf
+      - key: ALLOWED_MODELS
+        value: qwen2.5-0.5b-instruct-q4_k_m.gguf
+      - key: LIMITED_CAPABILITIES_WARNING
+        value: "true"
+      - key: DEMO_BANNER_MESSAGE
+        value: "Limited AI model capabilities (0.5B) in cloud demo. Run locally with Ollama or deploy your own instance to explore larger models."
       - key: LLAMA_N_CTX
         value: 1024
       - key: LLAMA_N_THREADS

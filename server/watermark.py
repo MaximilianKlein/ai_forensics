@@ -169,19 +169,19 @@ def detect_watermark(
     is_watermarked = z_score >= z_threshold
 
     if z_score >= 5.0:
-        confidence = "Extremely High (p < 0.000001)"
+        confidence = "Extremely High Confidence"
         verdict_text = "Definitively Watermarked AI Text"
     elif z_score >= 4.0:
-        confidence = "Very High (p < 0.0001)"
+        confidence = "Very High Confidence"
         verdict_text = "Strongly Watermarked AI Text"
     elif z_score >= 3.0:
-        confidence = "High (p < 0.001)"
+        confidence = "High Confidence"
         verdict_text = "Watermarked AI Text"
     elif z_score >= 2.0:
         confidence = "Moderate / Suspicious"
         verdict_text = "Possible Watermark / Mixed Text"
     else:
-        confidence = "Low / Neutral"
+        confidence = "Unwatermarked / Neutral"
         verdict_text = "Unwatermarked Text (Human or Standard AI)"
 
     summary = (

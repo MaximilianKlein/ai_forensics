@@ -17,7 +17,8 @@ import {
   Sliders,
   X,
   Save,
-  ExternalLink
+  ExternalLink,
+  Info
 } from 'lucide-react';
 import type { ModelInfo, WatermarkConfig, PrimaryTab, WatermarkSubTab } from './types';
 import { WatermarkStudio } from './components/WatermarkStudio';
@@ -42,6 +43,7 @@ export function App() {
   const [models, setModels] = useState<ModelInfo[]>([]);
   const [selectedModel, setSelectedModel] = useState<string>('');
   const [isBackendOnline, setIsBackendOnline] = useState<boolean>(false);
+  const [demoWarning, setDemoWarning] = useState<string | null>(null);
 
   // Cross-tool shared input text
   const [detectorInitialText, setDetectorInitialText] = useState<string>('');
@@ -110,6 +112,11 @@ export function App() {
         const data = await res.json();
         const modelList: ModelInfo[] = data.models || [];
         setModels(modelList);
+        if (data.demo_warning) {
+          setDemoWarning(data.demo_warning);
+        } else {
+          setDemoWarning(null);
+        }
         if (modelList.length > 0 && !selectedModel) {
           const initial = data.current_model || modelList[0].name;
           setSelectedModel(initial);
@@ -331,6 +338,26 @@ export function App() {
           </div>
         </div>
       </header>
+
+      {/* Cloud Demo / Limited Capabilities Notification Banner */}
+      {demoWarning && (
+        <div className="demo-notice-banner">
+          <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+            <Info size={15} color="var(--brand-cyan)" style={{ flexShrink: 0 }} />
+            <span>{demoWarning}</span>
+          </div>
+          <a
+            href="https://github.com/MaximilianKlein/ai_forensics"
+            target="_blank"
+            rel="noreferrer"
+            className="demo-notice-link"
+            title="View instructions to run full models locally with Ollama"
+          >
+            <span>Run Locally</span>
+            <ExternalLink size={12} />
+          </a>
+        </div>
+      )}
 
       {/* Primary Paradigm Tabs */}
       <nav className="nav-tabs">

@@ -1,6 +1,7 @@
 import os
 import glob
 import json
+import fnmatch
 import logging
 from typing import List, Dict, Any, Optional
 from llama_cpp import Llama
@@ -63,38 +64,15 @@ class ModelManager:
                         continue
                     
                     basename = os.path.basename(model_file)
-                    lower_base = basename.lower()
-                    
-                    # Compute friendly alias name
-                    if "qwen2.5-0.5b" in lower_base or "qwen2.5_0.5b" in lower_base:
-                        alias_name = "qwen2.5:0.5b"
-                    elif "qwen2.5-1.5b" in lower_base or "qwen2.5_1.5b" in lower_base:
-                        alias_name = "qwen2.5:1.5b"
-                    elif "gemma" in lower_base and "12b" in lower_base:
-                        alias_name = "gemma4:12b"
-                    elif "gemma" in lower_base and "2b" in lower_base:
-                        alias_name = "gemma:2b"
-                    elif "llama-3" in lower_base or "llama3" in lower_base:
-                        alias_name = "llama3:latest"
-                    else:
-                        alias_name = os.path.splitext(basename)[0]
-
                     size_gb = round(os.path.getsize(model_file) / (1024**3), 2)
-                    if alias_name not in models_dict:
-                        models_dict[alias_name] = ModelInfo(
-                            alias_name,
+                    
+                    if basename not in models_dict:
+                        models_dict[basename] = ModelInfo(
+                            basename,
                             os.path.abspath(model_file),
                             size_gb,
                             is_ollama=False
                         )
-                        # Also register exact filename as alternative lookup
-                        if basename != alias_name and basename not in models_dict:
-                            models_dict[basename] = ModelInfo(
-                                basename,
-                                os.path.abspath(model_file),
-                                size_gb,
-                                is_ollama=False
-                            )
 
         return list(models_dict.values())
 
@@ -133,7 +111,6 @@ class ModelManager:
                 except Exception as e:
                     logger.debug(f"Skipping {manifest_path}: {e}")
 
-        # Prioritize smaller/standard models first
         result = list(models_dict.values())
         result.sort(key=lambda m: (m.size_gb, m.name))
         return result
@@ -143,12 +120,36 @@ class ModelManager:
         ollama_models = self.scan_ollama_models()
 
         seen_paths = set()
+        seen_names = set()
         combined: List[ModelInfo] = []
 
         for m in dir_models + ollama_models:
-            if m.path not in seen_paths:
+            if m.path not in seen_paths and m.name not in seen_names:
                 seen_paths.add(m.path)
+                seen_names.add(m.name)
                 combined.append(m)
+
+        # Environment variable filter: ALLOWED_MODELS
+        # e.g., ALLOWED_MODELS="qwen2.5-0.5b-instruct-q4_k_m.gguf" or "qwen2.5-0.5b*,gemma:2b"
+        allowed_env = os.environ.get("ALLOWED_MODELS", "").strip()
+        if allowed_env:
+            allowed_patterns = [p.strip().lower() for p in allowed_env.split(",") if p.strip()]
+            filtered = []
+            for m in combined:
+                m_name_lower = m.name.lower()
+                m_path_base_lower = os.path.basename(m.path).lower()
+                for pat in allowed_patterns:
+                    if (
+                        pat == m_name_lower
+                        or pat == m_path_base_lower
+                        or pat in m_name_lower
+                        or pat in m_path_base_lower
+                        or fnmatch.fnmatch(m_name_lower, pat)
+                        or fnmatch.fnmatch(m_path_base_lower, pat)
+                    ):
+                        filtered.append(m)
+                        break
+            combined = filtered
 
         combined.sort(key=lambda m: (m.size_gb, m.name))
         return [m.to_dict() for m in combined]

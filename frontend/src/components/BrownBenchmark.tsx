@@ -972,13 +972,33 @@ export const BrownBenchmark = () => {
                   </div>
                 </div>
 
-                {hoveredToken && (
-                  <div style={{ background: 'var(--bg-input)', padding: '8px 12px', borderRadius: 'var(--radius-sm)', fontSize: '0.8rem', color: 'var(--text-secondary)', display: 'flex', gap: '14px' }}>
-                    <span>Token: <code style={{ color: 'var(--text-primary)' }}>{JSON.stringify(hoveredToken.text)}</code></span>
-                    <span>ID: <code style={{ color: 'var(--brand-cyan)' }}>{hoveredToken.id}</code></span>
-                    <span>Status: <strong style={{ color: hoveredToken.is_green ? 'var(--watermark-green)' : 'var(--watermark-red)' }}>{hoveredToken.is_green ? 'GREEN' : 'RED'}</strong></span>
-                  </div>
-                )}
+                <div
+                  style={{
+                    minHeight: '36px',
+                    marginTop: '8px',
+                    background: 'var(--bg-input)',
+                    padding: '8px 12px',
+                    borderRadius: 'var(--radius-sm)',
+                    fontSize: '0.8rem',
+                    color: 'var(--text-secondary)',
+                    display: 'flex',
+                    alignItems: 'center',
+                    gap: '14px',
+                    pointerEvents: 'none'
+                  }}
+                >
+                  {hoveredToken ? (
+                    <>
+                      <span>Token: <code style={{ color: 'var(--text-primary)' }}>{JSON.stringify(hoveredToken.text)}</code></span>
+                      <span>ID: <code style={{ color: 'var(--brand-cyan)' }}>{hoveredToken.id}</code></span>
+                      <span>Status: <strong style={{ color: hoveredToken.is_green ? 'var(--watermark-green)' : 'var(--watermark-red)' }}>{hoveredToken.is_green ? 'GREEN' : 'RED'}</strong></span>
+                    </>
+                  ) : (
+                    <span style={{ color: 'var(--text-muted)', fontSize: '0.78rem' }}>
+                      💡 Hover over any token to inspect its ID and partition status.
+                    </span>
+                  )}
+                </div>
               </div>
             ) : null}
           </div>

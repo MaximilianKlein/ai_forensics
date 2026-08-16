@@ -362,7 +362,7 @@ export const WatermarkStudio = ({
             </div>
           )}
 
-          <div className="stats-row">
+          <div className="stats-grid">
             <div className="stat-item">
               <span className="stat-label">Generated Tokens</span>
               <span className="stat-value">{tokens.length}</span>
@@ -402,29 +402,40 @@ export const WatermarkStudio = ({
             {isGenerating && <span className="stream-cursor" />}
           </div>
 
-          {hoveredToken && (
-            <div
-              style={{
-                background: 'var(--bg-input)',
-                border: '1px solid var(--border-color)',
-                padding: '8px 14px',
-                borderRadius: 'var(--radius-md)',
-                fontSize: '0.8rem',
-                display: 'flex',
-                gap: '16px',
-                color: 'var(--text-secondary)'
-              }}
-            >
-              <span>Token: <code style={{ color: 'var(--text-primary)' }}>{JSON.stringify(hoveredToken.text)}</code></span>
-              <span>ID: <code style={{ color: 'var(--brand-cyan)' }}>{hoveredToken.token_id}</code></span>
-              <span>
-                Status:{' '}
-                <strong style={{ color: hoveredToken.is_green ? 'var(--watermark-green)' : 'var(--watermark-red)' }}>
-                  {hoveredToken.is_green ? 'GREEN LIST (Boosted)' : 'RED LIST (Unboosted)'}
-                </strong>
+          {/* Reserved Token Inspector Bar (prevents layout shift / cursor flickering) */}
+          <div
+            style={{
+              minHeight: '38px',
+              marginTop: '8px',
+              background: 'var(--bg-input)',
+              border: '1px solid var(--border-color)',
+              padding: '8px 14px',
+              borderRadius: 'var(--radius-md)',
+              fontSize: '0.8rem',
+              display: 'flex',
+              alignItems: 'center',
+              gap: '16px',
+              color: 'var(--text-secondary)',
+              pointerEvents: 'none'
+            }}
+          >
+            {hoveredToken ? (
+              <>
+                <span>Token: <code style={{ color: 'var(--text-primary)' }}>{JSON.stringify(hoveredToken.text)}</code></span>
+                <span>ID: <code style={{ color: 'var(--brand-cyan)' }}>{hoveredToken.token_id}</code></span>
+                <span>
+                  Status:{' '}
+                  <strong style={{ color: hoveredToken.is_green ? 'var(--watermark-green)' : 'var(--watermark-red)' }}>
+                    {hoveredToken.is_green ? 'GREEN LIST (Logit Boosted)' : 'RED LIST (Unboosted)'}
+                  </strong>
+                </span>
+              </>
+            ) : (
+              <span style={{ color: 'var(--text-muted)', fontSize: '0.78rem' }}>
+                💡 Hover over any token to inspect its ID and partition status.
               </span>
-            </div>
-          )}
+            )}
+          </div>
         </div>
 
       {/* Embedded "How It Works" Collapsible Panel */}

@@ -212,43 +212,53 @@ export const WatermarkDetector = ({ selectedModel, config, initialText = '', onR
                 })}
               </div>
 
-              {hoveredToken && (
-                <div
-                  style={{
-                    marginTop: '8px',
-                    background: 'var(--bg-input)',
-                    border: '1px solid var(--border-color)',
-                    padding: '8px 14px',
-                    borderRadius: 'var(--radius-md)',
-                    fontSize: '0.8rem',
-                    display: 'flex',
-                    gap: '16px',
-                    color: 'var(--text-secondary)'
-                  }}
-                >
-                  <span>Token: <code style={{ color: 'var(--text-primary)' }}>{JSON.stringify(hoveredToken.text)}</code></span>
-                  <span>ID: <code style={{ color: 'var(--brand-cyan)' }}>{hoveredToken.id}</code></span>
-                  <span>
-                    Status:{' '}
-                    <strong
-                      style={{
-                        color:
-                          hoveredToken.is_green === true
-                            ? 'var(--watermark-green)'
-                            : hoveredToken.is_green === false
-                            ? 'var(--watermark-red)'
-                            : 'var(--text-muted)'
-                      }}
-                    >
-                      {hoveredToken.is_green === true
-                        ? 'GREEN (Matched partition)'
-                        : hoveredToken.is_green === false
-                        ? 'RED (Did not match)'
-                        : 'Context Prefix'}
-                    </strong>
+              {/* Reserved Token Inspector Bar (prevents layout shift / cursor flickering) */}
+              <div
+                style={{
+                  minHeight: '38px',
+                  marginTop: '8px',
+                  background: 'var(--bg-input)',
+                  border: '1px solid var(--border-color)',
+                  padding: '8px 14px',
+                  borderRadius: 'var(--radius-md)',
+                  fontSize: '0.8rem',
+                  display: 'flex',
+                  alignItems: 'center',
+                  gap: '16px',
+                  color: 'var(--text-secondary)',
+                  pointerEvents: 'none'
+                }}
+              >
+                {hoveredToken ? (
+                  <>
+                    <span>Token: <code style={{ color: 'var(--text-primary)' }}>{JSON.stringify(hoveredToken.text)}</code></span>
+                    <span>ID: <code style={{ color: 'var(--brand-cyan)' }}>{hoveredToken.id}</code></span>
+                    <span>
+                      Status:{' '}
+                      <strong
+                        style={{
+                          color:
+                            hoveredToken.is_green === true
+                              ? 'var(--watermark-green)'
+                              : hoveredToken.is_green === false
+                              ? 'var(--watermark-red)'
+                              : 'var(--text-muted)'
+                        }}
+                      >
+                        {hoveredToken.is_green === true
+                          ? 'GREEN (Matched partition)'
+                          : hoveredToken.is_green === false
+                          ? 'RED (Did not match)'
+                          : 'Context Prefix'}
+                      </strong>
+                    </span>
+                  </>
+                ) : (
+                  <span style={{ color: 'var(--text-muted)', fontSize: '0.78rem' }}>
+                    💡 Hover over any token to inspect its ID and partition status.
                   </span>
-                </div>
-              )}
+                )}
+              </div>
             </div>
           </div>
         )}
