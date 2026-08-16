@@ -136,9 +136,11 @@ def health():
 @app.get("/api/health")
 def health_endpoint():
     status = model_manager.get_status()
+    if not status["is_ready"]:
+        raise HTTPException(status_code=503, detail="Model is still initializing weights")
     return {
-        "status": "ready" if status["is_ready"] else "loading" if status["status"] == "loading" else "idle",
-        "is_ready": status["is_ready"],
+        "status": "ready",
+        "is_ready": True,
         "model_status": status
     }
 
@@ -682,7 +684,7 @@ def get_model_config_endpoint(model_name: str):
 
 
 # ---------------------------------------------------------------------------
-# Startup Model Auto-Loading
+# Startup Model Pre-loading & Warmup (Pre-loads model into memory before traffic)
 # ---------------------------------------------------------------------------
 @app.on_event("startup")
 async def startup_event():
@@ -691,16 +693,16 @@ async def startup_event():
     target_model = default_model_env or (avail[0]["name"] if avail else None)
 
     if target_model:
-        def bg_load():
+        try:
+            logger.info(f"Startup: Pre-loading default model '{target_model}' into memory before going live...")
+            llm = model_manager.load_model(target_model)
             try:
-                logger.info(f"Startup: Auto-loading default model '{target_model}' in background thread...")
-                model_manager.load_model(target_model)
-                logger.info(f"Startup: Successfully initialized '{target_model}'.")
-            except Exception as e:
-                logger.warning(f"Startup: Could not auto-load '{target_model}': {e}")
-
-        t = threading.Thread(target=bg_load, daemon=True, name="StartupModelLoader")
-        t.start()
+                _ = llm.tokenize(b"Warmup")
+            except Exception:
+                pass
+            logger.info(f"Startup: Successfully initialized and warmed up '{target_model}'. Ready to serve.")
+        except Exception as e:
+            logger.warning(f"Startup: Could not auto-load '{target_model}': {e}")
 
 
 # ---------------------------------------------------------------------------
