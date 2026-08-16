@@ -18,7 +18,8 @@ import {
   X,
   Save,
   ExternalLink,
-  Info
+  Info,
+  Loader2
 } from 'lucide-react';
 import type { ModelInfo, WatermarkConfig, PrimaryTab, WatermarkSubTab } from './types';
 import { WatermarkStudio } from './components/WatermarkStudio';
@@ -44,6 +45,12 @@ export function App() {
   const [selectedModel, setSelectedModel] = useState<string>('');
   const [isBackendOnline, setIsBackendOnline] = useState<boolean>(false);
   const [demoWarning, setDemoWarning] = useState<string | null>(null);
+  const [modelStatus, setModelStatus] = useState<{
+    status: string;
+    is_ready: boolean;
+    current_model?: string | null;
+    loading_model?: string | null;
+  }>({ status: 'idle', is_ready: false });
 
   // Cross-tool shared input text
   const [detectorInitialText, setDetectorInitialText] = useState<string>('');
@@ -104,7 +111,7 @@ export function App() {
     return () => mediaQuery.removeEventListener('change', applyTheme);
   }, [themeMode]);
 
-  // Model Polling
+  // Model Polling & Readiness Tracking
   const fetchModels = useCallback(async () => {
     try {
       const res = await fetch('/api/models');
@@ -112,6 +119,9 @@ export function App() {
         const data = await res.json();
         const modelList: ModelInfo[] = data.models || [];
         setModels(modelList);
+        if (data.model_status) {
+          setModelStatus(data.model_status);
+        }
         if (data.demo_warning) {
           setDemoWarning(data.demo_warning);
         } else {
@@ -130,11 +140,36 @@ export function App() {
     } catch (e) {
       console.warn('Backend not responding yet:', e);
       setIsBackendOnline(false);
+      setModelStatus({ status: 'offline', is_ready: false });
     }
   }, [selectedModel]);
 
+  // Dynamic polling rate: 1s while weights are loading, 4s when idle/ready
+  useEffect(() => {
+    fetchModels();
+    const interval = setInterval(fetchModels, modelStatus.status === 'loading' ? 1000 : 4000);
+    return () => clearInterval(interval);
+  }, [fetchModels, modelStatus.status]);
+
   const handleModelChange = async (newModel: string) => {
     setSelectedModel(newModel);
+    setModelStatus({ status: 'loading', is_ready: false, loading_model: newModel });
+
+    // Request model load on backend
+    try {
+      const loadRes = await fetch('/api/models/load', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ model_name: newModel })
+      });
+      if (loadRes.ok) {
+        const loadData = await loadRes.json();
+        if (loadData.model_status) setModelStatus(loadData.model_status);
+      }
+    } catch (e) {
+      console.warn('Failed to load model on switch:', e);
+    }
+
     const m = models.find((x) => x.name === newModel);
     if (m && m.recommended_delta !== undefined) {
       setConfig((prev) => ({ ...prev, delta: m.recommended_delta! }));
@@ -271,16 +306,31 @@ export function App() {
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-          {/* Global Model Selector */}
-          <div className="header-model-selector" title="Active Model across all Forensic Paradigms">
-            <div className={`status-indicator ${isBackendOnline ? '' : 'offline'}`} />
+          {/* Global Model Selector & Readiness Indicator */}
+          <div
+            className="header-model-selector"
+            title={
+              !isBackendOnline
+                ? 'Backend is offline'
+                : modelStatus.status === 'loading'
+                ? `Loading weights for ${modelStatus.loading_model || selectedModel}...`
+                : modelStatus.is_ready
+                ? `Model loaded & ready for inference`
+                : 'Model not initialized'
+            }
+          >
+            <div
+              className={`status-indicator ${
+                !isBackendOnline ? 'offline' : modelStatus.status === 'loading' ? 'loading' : 'ready'
+              }`}
+            />
             <Cpu size={14} color="var(--brand-cyan)" />
             <span style={{ fontSize: '0.78rem', color: 'var(--text-muted)', fontWeight: 500 }}>Model:</span>
             <select
               className="header-model-select"
               value={selectedModel}
               onChange={(e) => handleModelChange(e.target.value)}
-              disabled={!isBackendOnline || models.length === 0}
+              disabled={!isBackendOnline || models.length === 0 || modelStatus.status === 'loading'}
             >
               {models.map((m) => (
                 <option key={m.name} value={m.name}>
@@ -291,6 +341,12 @@ export function App() {
                 <option value="">{isBackendOnline ? 'No Models Found' : 'Backend Offline'}</option>
               )}
             </select>
+            {modelStatus.status === 'loading' && (
+              <span style={{ display: 'inline-flex', alignItems: 'center', gap: '4px', fontSize: '0.72rem', color: '#f59e0b', fontWeight: 600 }}>
+                <Loader2 size={12} className="spin" />
+                <span>Loading...</span>
+              </span>
+            )}
           </div>
 
           {/* Model Profile & Thinking Bypass Settings Button */}
@@ -468,6 +524,7 @@ export function App() {
                   temperature={temperature}
                   onChangeTemperature={setTemperature}
                   activeSubTab={watermarkSubTab}
+                  isModelReady={isBackendOnline && modelStatus.is_ready}
                   isGenerating={isStudioGenerating}
                   onStartGeneration={() => studioStartGenRef.current?.()}
                   onStopGeneration={() => studioStopGenRef.current?.()}

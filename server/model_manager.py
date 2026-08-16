@@ -35,11 +35,51 @@ class ModelInfo:
             "disable_thinking": self.disable_thinking
         }
 
+import threading
+
 class ModelManager:
     def __init__(self):
         self.current_model: Optional[Llama] = None
         self.current_model_name: Optional[str] = None
         self.current_model_path: Optional[str] = None
+        self.is_loading: bool = False
+        self.loading_model_name: Optional[str] = None
+        self.load_error: Optional[str] = None
+        self._load_lock = threading.Lock()
+
+    def get_status(self) -> Dict[str, Any]:
+        if self.is_loading:
+            return {
+                "status": "loading",
+                "is_ready": False,
+                "current_model": self.current_model_name,
+                "loading_model": self.loading_model_name,
+                "error": None
+            }
+        elif self.current_model is not None:
+            return {
+                "status": "ready",
+                "is_ready": True,
+                "current_model": self.current_model_name,
+                "loading_model": None,
+                "error": None
+            }
+        elif self.load_error:
+            return {
+                "status": "error",
+                "is_ready": False,
+                "current_model": None,
+                "loading_model": None,
+                "error": self.load_error
+            }
+        else:
+            return {
+                "status": "idle",
+                "is_ready": False,
+                "current_model": None,
+                "loading_model": None,
+                "error": None
+            }
 
     def scan_directory_models(self) -> List[ModelInfo]:
         """
@@ -130,7 +170,6 @@ class ModelManager:
                 combined.append(m)
 
         # Environment variable filter: ALLOWED_MODELS
-        # e.g., ALLOWED_MODELS="qwen2.5-0.5b-instruct-q4_k_m.gguf" or "qwen2.5-0.5b*,gemma:2b"
         allowed_env = os.environ.get("ALLOWED_MODELS", "").strip()
         if allowed_env:
             allowed_patterns = [p.strip().lower() for p in allowed_env.split(",") if p.strip()]
@@ -156,10 +195,8 @@ class ModelManager:
 
     def load_model(self, model_name_or_path: str, n_ctx: Optional[int] = None, n_gpu_layers: Optional[int] = None) -> Llama:
         """
-        Loads a GGUF model into memory or returns cached instance if already loaded.
-        Respects environment variables for low-memory Render deployments (LLAMA_N_CTX, LLAMA_N_THREADS).
+        Loads a GGUF model into memory with thread safety and readiness state tracking.
         """
-        # Resolve target path
         target_path = model_name_or_path
         all_models = self.scan_directory_models() + self.scan_ollama_models()
 
@@ -180,35 +217,48 @@ class ModelManager:
         if self.current_model is not None and self.current_model_path == target_path:
             return self.current_model
 
-        if self.current_model is not None:
-            del self.current_model
-            self.current_model = None
+        with self._load_lock:
+            if self.current_model is not None and self.current_model_path == target_path:
+                return self.current_model
 
-        # Environment variable overrides for resource-constrained environments
-        effective_n_ctx = n_ctx if n_ctx is not None else int(os.environ.get("LLAMA_N_CTX", 2048))
-        effective_n_gpu_layers = n_gpu_layers if n_gpu_layers is not None else int(os.environ.get("LLAMA_N_GPU_LAYERS", -1))
-        effective_n_threads = int(os.environ.get("LLAMA_N_THREADS", max(1, os.cpu_count() or 1)))
+            self.is_loading = True
+            self.loading_model_name = model_name_or_path
+            self.load_error = None
 
-        logger.info(f"Loading model from {target_path} (n_ctx={effective_n_ctx}, n_threads={effective_n_threads}, n_gpu_layers={effective_n_gpu_layers})...")
-        try:
-            self.current_model = Llama(
-                model_path=target_path,
-                n_ctx=effective_n_ctx,
-                n_threads=effective_n_threads,
-                n_gpu_layers=effective_n_gpu_layers,
-                verbose=False
-            )
-            self.current_model_path = target_path
-            self.current_model_name = model_name_or_path
-            return self.current_model
-        except Exception as e:
-            err_msg = str(e)
-            if "dimension_sections" in err_msg or "hyperparameters" in err_msg or "architecture" in err_msg:
-                raise ValueError(
-                    f"Model '{model_name_or_path}' has an experimental or vision architecture unsupported by current llama.cpp. "
-                    f"Please select a standard text model (e.g. qwen2.5:0.5b, llama3.2, mistral)."
-                ) from e
-            raise e
+            try:
+                if self.current_model is not None:
+                    del self.current_model
+                    self.current_model = None
+
+                effective_n_ctx = n_ctx if n_ctx is not None else int(os.environ.get("LLAMA_N_CTX", 2048))
+                effective_n_gpu_layers = n_gpu_layers if n_gpu_layers is not None else int(os.environ.get("LLAMA_N_GPU_LAYERS", -1))
+                effective_n_threads = int(os.environ.get("LLAMA_N_THREADS", max(1, os.cpu_count() or 1)))
+
+                logger.info(f"Loading model from {target_path} (n_ctx={effective_n_ctx}, n_threads={effective_n_threads}, n_gpu_layers={effective_n_gpu_layers})...")
+                
+                self.current_model = Llama(
+                    model_path=target_path,
+                    n_ctx=effective_n_ctx,
+                    n_threads=effective_n_threads,
+                    n_gpu_layers=effective_n_gpu_layers,
+                    verbose=False
+                )
+                self.current_model_path = target_path
+                self.current_model_name = model_name_or_path
+                self.is_loading = False
+                self.loading_model_name = None
+                return self.current_model
+            except Exception as e:
+                self.is_loading = False
+                self.loading_model_name = None
+                self.load_error = str(e)
+                err_msg = str(e)
+                if "dimension_sections" in err_msg or "hyperparameters" in err_msg or "architecture" in err_msg:
+                    raise ValueError(
+                        f"Model '{model_name_or_path}' has an experimental or vision architecture unsupported by current llama.cpp. "
+                        f"Please select a standard text model (e.g. qwen2.5:0.5b, llama3.2, mistral)."
+                    ) from e
+                raise e
 
     def get_loaded_model(self) -> Optional[Llama]:
         return self.current_model

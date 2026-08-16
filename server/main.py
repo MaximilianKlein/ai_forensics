@@ -132,9 +132,23 @@ def health():
         "is_model_loaded": current_model is not None
     }
 
+@app.get("/api/health")
+def health_endpoint():
+    status = model_manager.get_status()
+    return {
+        "status": "ready" if status["is_ready"] else "loading" if status["status"] == "loading" else "idle",
+        "is_ready": status["is_ready"],
+        "model_status": status
+    }
+
+@app.get("/api/models/status")
+def model_status_endpoint():
+    return model_manager.get_status()
+
 @app.get("/api/models")
 def get_models():
     models = model_manager.list_available_models()
+    model_status = model_manager.get_status()
     
     # Check for demo/cloud limited capabilities notice
     demo_warning = None
@@ -161,12 +175,14 @@ def get_models():
             return {
                 "models": fallback_models,
                 "current_model": model_manager.current_model_name or (fallback_models[0]["name"] if fallback_models else None),
-                "demo_warning": demo_warning
+                "demo_warning": demo_warning,
+                "model_status": model_status
             }
     return {
         "models": models,
         "current_model": model_manager.current_model_name or (models[0]["name"] if models else None),
-        "demo_warning": demo_warning
+        "demo_warning": demo_warning,
+        "model_status": model_status
     }
 
 @app.post("/api/models/load")
@@ -674,12 +690,16 @@ async def startup_event():
     target_model = default_model_env or (avail[0]["name"] if avail else None)
 
     if target_model:
-        try:
-            logger.info(f"Startup: Auto-loading default model '{target_model}'...")
-            model_manager.load_model(target_model)
-            logger.info(f"Startup: Successfully initialized '{target_model}'.")
-        except Exception as e:
-            logger.warning(f"Startup: Could not auto-load '{target_model}': {e}")
+        def bg_load():
+            try:
+                logger.info(f"Startup: Auto-loading default model '{target_model}' in background thread...")
+                model_manager.load_model(target_model)
+                logger.info(f"Startup: Successfully initialized '{target_model}'.")
+            except Exception as e:
+                logger.warning(f"Startup: Could not auto-load '{target_model}': {e}")
+
+        t = threading.Thread(target=bg_load, daemon=True, name="StartupModelLoader")
+        t.start()
 
 
 # ---------------------------------------------------------------------------

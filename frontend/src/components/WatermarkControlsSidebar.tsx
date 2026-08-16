@@ -22,6 +22,7 @@ interface WatermarkControlsSidebarProps {
   temperature: number;
   onChangeTemperature: (val: number) => void;
   activeSubTab: WatermarkSubTab;
+  isModelReady?: boolean;
   // Contextual actions
   isGenerating?: boolean;
   onStartGeneration?: () => void;
@@ -43,6 +44,7 @@ export const WatermarkControlsSidebar: React.FC<WatermarkControlsSidebarProps> =
   temperature,
   onChangeTemperature,
   activeSubTab,
+  isModelReady = true,
   isGenerating = false,
   onStartGeneration,
   onStopGeneration,
@@ -278,9 +280,15 @@ export const WatermarkControlsSidebar: React.FC<WatermarkControlsSidebarProps> =
       <div style={{ marginTop: '4px' }}>
         {activeSubTab === 'studio' && (
           !isGenerating ? (
-            <button className="btn-primary" style={{ width: '100%' }} onClick={onStartGeneration}>
-              <Play size={16} fill="currentColor" />
-              Generate Watermarked Text
+            <button
+              className="btn-primary"
+              style={{ width: '100%', opacity: !isModelReady ? 0.7 : 1 }}
+              onClick={onStartGeneration}
+              disabled={!isModelReady}
+              title={!isModelReady ? "Model weights are currently loading into memory..." : undefined}
+            >
+              {!isModelReady ? <Activity size={16} className="spin" /> : <Play size={16} fill="currentColor" />}
+              <span>{!isModelReady ? 'Initializing Model...' : 'Generate Watermarked Text'}</span>
             </button>
           ) : (
             <button
@@ -309,12 +317,13 @@ export const WatermarkControlsSidebar: React.FC<WatermarkControlsSidebarProps> =
         {activeSubTab === 'compare' && (
           <button
             className="btn-primary"
-            style={{ width: '100%' }}
+            style={{ width: '100%', opacity: !isModelReady ? 0.7 : 1 }}
             onClick={onRunCompare}
-            disabled={isComparing}
+            disabled={isComparing || !isModelReady}
+            title={!isModelReady ? "Model weights are currently loading into memory..." : undefined}
           >
-            {isComparing ? <Activity size={16} className="spin" /> : <Columns2 size={16} />}
-            <span>{isComparing ? 'Comparing Models...' : 'Run Side-by-Side Comparison'}</span>
+            {isComparing || !isModelReady ? <Activity size={16} className="spin" /> : <Columns2 size={16} />}
+            <span>{!isModelReady ? 'Initializing Model...' : isComparing ? 'Comparing Models...' : 'Run Side-by-Side Comparison'}</span>
           </button>
         )}
 
